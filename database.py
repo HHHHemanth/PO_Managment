@@ -7,8 +7,19 @@ MONGO_URL = os.getenv("MONGO_URL")
 client = AsyncIOMotorClient(
     MONGO_URL,
     tls=True,
-    tlsCAFile=certifi.where()
+    tlsCAFile=certifi.where(),
+    tlsAllowInvalidCertificates=False,
+    serverSelectionTimeoutMS=30000,
+    connectTimeoutMS=30000,
+    socketTimeoutMS=30000
 )
+
+# Force connection on startup
+try:
+    client.admin.command('ping')
+    print("MongoDB connected successfully")
+except Exception as e:
+    print("MongoDB connection error:", e)
 
 db = client.inventory_management_db
 
