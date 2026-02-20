@@ -1,5 +1,8 @@
 from pydantic import BaseModel
 from typing import Optional
+from pydantic import BaseModel, field_validator
+from typing import Optional
+from datetime import datetime
 
 class LoginAdmin(BaseModel):
     password: str
@@ -25,3 +28,22 @@ class RecordCreate(BaseModel):
     document2_link: Optional[str] = ""
 
     purpose: Optional[str] = ""
+    created_at: Optional[datetime] = None
+
+    @field_validator("created_at", mode="before")
+    def parse_date(cls, value):
+        if value in (None, "", "N/A"):
+            return None
+
+        if isinstance(value, datetime):
+            return value
+
+        try:
+            return datetime.strptime(value, "%d/%m/%Y")
+        except ValueError:
+            raise ValueError("created_at must be in DD/MM/YYYY format or N/A")
+
+class StaffCreate(BaseModel):
+    staff_id: str
+    name: str
+    password: str

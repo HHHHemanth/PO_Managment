@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from database import users_collection, records_collection
-from schemas import LoginAdmin, LoginStaff, RecordCreate
+from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate
 from auth import verify_password, create_token
 from audit import log_action
 
@@ -71,7 +71,7 @@ async def staff_login(data: LoginStaff):
         "staff_id": data.staff_id
     })
 
-    return {"token": token}
+    return {"token": token, "staff_id": data.staff_id, "name": staff["name"], "role": staff["role"]}
 
 
 # ---------------- CREATE RECORD ---------------- #
@@ -176,3 +176,27 @@ async def delete_record(record_id: str, user=Depends(get_current_user)):
     )
 
     return {"message": "Record deleted"}
+
+# ---------------- CREATE STAFF---------------- #
+
+@router.post("/admin/create-staff")
+async def create_staff(data: StaffCreate, user=Depends(get_current_user)):
+
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only admin can create staff")
+
+    from auth import hash_password
+
+    hashed = hash_password(data.password)
+
+    new_staff = {
+        "staff_id": data.staff_id,
+        "name": data.name,
+        "password_hash": hashed,
+        "role": "staff",
+        "is_active": True
+    }
+
+    await users_collection.insert_one(new_staff)
+
+    return {"message": "Staff created successfully"}
