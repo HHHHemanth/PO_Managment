@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends
-from database import users_collection, records_collection, records_deleted_collection, users_deleted_collection
+from database import users_collection, records_collection, records_deleted_collection, users_deleted_collection, document_links_collection
 from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate
 from auth import verify_password, create_token
 from audit import log_action
@@ -10,7 +10,9 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import os
 
 from datetime import datetime
-
+from fastapi import UploadFile, File, Form
+import uuid
+from supabase_client import supabase
 router = APIRouter()
 
 # JWT Security setup
@@ -38,7 +40,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 # ---------------- AUTH ---------------- #
 # ---------------- LOGIN ROUTES ---------------- #
 
-@router.post("/login/admin")
+@router.post("/login/admin", tags=["Authentication"])
 async def admin_login(data: LoginAdmin):
 
     admin = await users_collection.find_one({"role": "admin"})
@@ -57,7 +59,7 @@ async def admin_login(data: LoginAdmin):
     return {"token": token}
 
 
-@router.post("/login/staff")
+@router.post("/login/staff", tags=["Authentication"])
 async def staff_login(data: LoginStaff):
 
     staff = await users_collection.find_one({"staff_id": data.staff_id})
@@ -80,7 +82,7 @@ async def staff_login(data: LoginStaff):
 # ---------------- RECORDS (ACTIVE) ---------------- #
 # ---------------- CREATE RECORD ---------------- #
 
-@router.post("/records")
+@router.post("/records", tags=["Records"])
 async def create_record(record: RecordCreate, user=Depends(get_current_user)):
 
     approval = record.approval_rs
@@ -110,7 +112,7 @@ async def create_record(record: RecordCreate, user=Depends(get_current_user)):
 
 # ---------------- GET RECORDS ---------------- #
 
-@router.get("/records")
+@router.get("/records", tags=["Records"])
 async def get_records(user=Depends(get_current_user)):
 
     if user["role"] == "admin":
@@ -127,7 +129,7 @@ async def get_records(user=Depends(get_current_user)):
 
 
 # ---------------- UPDATE RECORD ---------------- #
-@router.put("/records/{record_id}")
+@router.put("/records/{record_id}", tags=["Records"])
 async def update_record(record_id: str, record: RecordCreate, user=Depends(get_current_user)):
 
     approval = record.approval_rs
@@ -155,7 +157,7 @@ async def update_record(record_id: str, record: RecordCreate, user=Depends(get_c
 
 # ---------------- DELETE RECORD (ADMIN + STAFF OWN RECORDS) ---------------- #
 
-@router.delete("/records/{record_id}")
+@router.delete("/records/{record_id}", tags=["Records"])
 async def delete_record(record_id: str, user=Depends(get_current_user)):
 
     record = await records_collection.find_one({"_id": ObjectId(record_id)})
@@ -201,7 +203,7 @@ async def delete_record(record_id: str, user=Depends(get_current_user)):
 
 # ---------------- VIEW MY DELETED RECORDS ---------------- #
 
-@router.get("/records/deleted")
+@router.get("/records/deleted", tags=["Records - Deleted"])
 async def view_my_deleted_records(user=Depends(get_current_user)):
 
     if user["role"] == "admin":
@@ -225,7 +227,7 @@ async def view_my_deleted_records(user=Depends(get_current_user)):
 
 # ---------------- VIEW DELETED RECORDS (ADMIN ONLY) ---------------- #
 
-@router.get("/admin/deleted/records")
+@router.get("/admin/deleted/records", tags=["Records - Deleted"])
 async def view_deleted_records(user=Depends(get_current_user)):
 
     if user["role"] != "admin":
@@ -242,7 +244,7 @@ async def view_deleted_records(user=Depends(get_current_user)):
 
 # ---------------- RESTORE RECORD (ADMIN + STAFF OWN RECORDS) ---------------- #
 
-@router.post("/records/restore/{record_id}")
+@router.post("/records/restore/{record_id}", tags=["Records - Deleted"])
 async def restore_record(record_id: str, user=Depends(get_current_user)):
 
     deleted_record = await records_deleted_collection.find_one(
@@ -294,7 +296,7 @@ async def restore_record(record_id: str, user=Depends(get_current_user)):
 # ---------------- STAFF (ACTIVE) ---------------- #
 # ---------------- VIEW ALL STAFF (ADMIN ONLY) ---------------- #
 
-@router.get("/admin/staffs")
+@router.get("/admin/staffs", tags=["Staff Management"])
 async def get_all_staff(user=Depends(get_current_user)):
 
     if user["role"] != "admin":
@@ -313,7 +315,7 @@ async def get_all_staff(user=Depends(get_current_user)):
 
 # ---------------- CREATE STAFF---------------- #
 
-@router.post("/admin/create-staff")
+@router.post("/admin/create-staff", tags=["Staff Management"])
 async def create_staff(data: StaffCreate, user=Depends(get_current_user)):
 
     if user["role"] != "admin":
@@ -338,7 +340,7 @@ async def create_staff(data: StaffCreate, user=Depends(get_current_user)):
 
 # ---------------- DELETE STAFF---------------- #
 
-@router.delete("/staff/{staff_id}")
+@router.delete("/staff/{staff_id}", tags=["Staff Management"])
 async def delete_staff(staff_id: str, user=Depends(get_current_user)):
 
     if user["role"] != "admin":
@@ -367,7 +369,7 @@ async def delete_staff(staff_id: str, user=Depends(get_current_user)):
 
 # ---------------- VIEW DELETED STAFF (ADMIN ONLY) ---------------- #
 
-@router.get("/admin/deleted/staffs")
+@router.get("/admin/deleted/staffs", tags=["Staff Management"])
 async def view_deleted_staff(user=Depends(get_current_user)):
 
     if user["role"] != "admin":
@@ -382,7 +384,7 @@ async def view_deleted_staff(user=Depends(get_current_user)):
     return staffs
 
 # ---------------- RESTORE STAFF---------------- #
-@router.post("/staff/restore/{staff_id}")
+@router.post("/staff/restore/{staff_id}", tags=["Staff Management"])
 async def restore_staff(staff_id: str, user=Depends(get_current_user)):
 
     if user["role"] != "admin":
@@ -403,3 +405,159 @@ async def restore_staff(staff_id: str, user=Depends(get_current_user)):
 
 
 # ---------------- END STAFF (DELETED / RESTORE) ---------------- #
+
+
+# ---------------- DOCUMENT PART  ---------------- #
+
+
+# ---------------- UPLOAD DOCUMENT ---------------- #
+
+
+@router.post("/records/{record_id}/upload", tags=["Documents"])
+async def upload_document(
+    record_id: str,
+    document_name: str = Form(...),
+    file: UploadFile = File(...),
+    user=Depends(get_current_user)
+):
+
+    # Validate record exists
+    record = await records_collection.find_one({"_id": ObjectId(record_id)})
+    if not record:
+        raise HTTPException(404, "Record not found")
+
+    # Staff restriction
+    if user["role"] == "staff" and record["staff_id"] != user["staff_id"]:
+        raise HTTPException(403, "Not authorized")
+
+    pr_po_no = record["pr_po_no"]
+
+    # Validate file type
+    allowed_types = ["application/pdf", "image/jpeg", "image/png"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(400, "Only PDF/JPEG/PNG allowed")
+
+    #  CHECK FOR DUPLICATE NAME
+    existing = await document_links_collection.find_one({
+        "record_id": ObjectId(record_id),
+        "document_name": document_name,
+        "status": "active"
+    })
+
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail="Document name already exists for this record"
+        )
+
+    # Generate document_id
+    document_id = str(uuid.uuid4())
+
+    file_extension = file.filename.split(".")[-1]
+    file_name = f"{document_name}.{file_extension}"
+
+    file_path = f"{pr_po_no}/{file_name}"
+
+    # Upload to Supabase
+    file_bytes = await file.read()
+
+    supabase.storage.from_("PO_Managment_Documents").upload(
+        file_path,
+        file_bytes
+    )
+
+    public_url = supabase.storage.from_("PO_Managment_Documents").get_public_url(file_path)
+
+    # Save in MongoDB
+    document_data = {
+        "document_id": document_id,
+        "record_id": ObjectId(record_id),
+        "pr_po_no": pr_po_no,
+        "document_name": document_name,
+        "file_extension": file_extension,
+        "file_path": file_path,
+        "public_url": public_url,
+        "status": "active",
+        "uploaded_by": user["staff_id"],
+        "uploaded_at": datetime.utcnow(),
+        "deleted_by": None,
+        "deleted_at": None
+    }
+
+    await document_links_collection.insert_one(document_data)
+
+    return {
+        "message": "Document uploaded successfully",
+        "document_id": document_id,
+        "record_id": record_id,
+        "name": document_name,
+        "url": public_url
+    }
+
+# ---------------- VIEW DOCUMENT ---------------- #
+
+@router.get("/records/{record_id}/documents/{document_id}", tags=["Documents"])
+async def view_document(record_id: str, document_id: str, user=Depends(get_current_user)):
+
+    document = await document_links_collection.find_one({
+        "document_id": document_id,
+        "record_id": ObjectId(record_id),
+        "status": "active"
+    })
+
+    if not document:
+        raise HTTPException(404, "Document not found")
+
+    # Staff restriction
+    record = await records_collection.find_one({"_id": ObjectId(record_id)})
+    if user["role"] == "staff" and record["staff_id"] != user["staff_id"]:
+        raise HTTPException(403, "Not authorized")
+
+    return {
+        "document_id": document_id,
+        "url": document["public_url"]
+    }
+
+
+
+# ---------------- DELETE DOCUMENT (SOFT) ---------------- #
+
+@router.delete("/documents/{document_id}", tags=["Documents"])
+async def delete_document(document_id: str, user=Depends(get_current_user)):
+
+    document = await document_links_collection.find_one({
+        "document_id": document_id,
+        "status": "active"
+    })
+
+    if not document:
+        raise HTTPException(404, "Document not found")
+
+    await document_links_collection.update_one(
+        {"document_id": document_id},
+        {
+            "$set": {
+                "status": "deleted",
+                "deleted_by": user["staff_id"],
+                "deleted_at": datetime.utcnow()
+            }
+        }
+    )
+
+    return {"message": "Document marked as deleted"}
+
+
+
+@router.get("/records/{record_id}/documents", tags=["Documents"])
+async def list_documents(record_id: str, user=Depends(get_current_user)):
+
+    documents = await document_links_collection.find({
+        "record_id": ObjectId(record_id),
+        "status": "active"
+    }).to_list(100)
+
+    for doc in documents:
+        doc["_id"] = str(doc["_id"])
+        doc["record_id"] = str(doc["record_id"])
+
+    return documents
