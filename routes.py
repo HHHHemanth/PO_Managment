@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends
-from database import users_collection, records_collection
+from database import users_collection, records_collection, records_deleted_collection, users_deleted_collection
 from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate
 from auth import verify_password, create_token
 from audit import log_action
@@ -8,6 +8,8 @@ from bson import ObjectId
 from jose import jwt
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import os
+
+from datetime import datetime
 
 router = APIRouter()
 
@@ -33,7 +35,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
             detail="Invalid or expired token"
         )
 
-
+# ---------------- AUTH ---------------- #
 # ---------------- LOGIN ROUTES ---------------- #
 
 @router.post("/login/admin")
@@ -73,7 +75,9 @@ async def staff_login(data: LoginStaff):
 
     return {"token": token, "staff_id": data.staff_id, "name": staff["name"], "role": staff["role"]}
 
+# ---------------- END AUTH ---------------- #
 
+# ---------------- RECORDS (ACTIVE) ---------------- #
 # ---------------- CREATE RECORD ---------------- #
 
 @router.post("/records")
@@ -123,7 +127,6 @@ async def get_records(user=Depends(get_current_user)):
 
 
 # ---------------- UPDATE RECORD ---------------- #
-
 @router.put("/records/{record_id}")
 async def update_record(record_id: str, record: RecordCreate, user=Depends(get_current_user)):
 
@@ -149,33 +152,164 @@ async def update_record(record_id: str, record: RecordCreate, user=Depends(get_c
     return {"message": "Record updated"}
 
 
-# ---------------- DELETE RECORD ---------------- #
+
+# ---------------- DELETE RECORD (ADMIN + STAFF OWN RECORDS) ---------------- #
 
 @router.delete("/records/{record_id}")
 async def delete_record(record_id: str, user=Depends(get_current_user)):
 
-    record = await records_collection.find_one(
-        {"_id": ObjectId(record_id)}
-    )
+    record = await records_collection.find_one({"_id": ObjectId(record_id)})
 
     if not record:
         raise HTTPException(404, "Record not found")
 
-    if user["role"] != "admin" and record["staff_id"] != user["staff_id"]:
+    # Admin can delete any record
+    if user["role"] == "admin":
+        pass
+
+    # Staff can delete only their own records
+    elif user["role"] == "staff":
+        if record["staff_id"] != user["staff_id"]:
+            raise HTTPException(403, "You can delete only your own records")
+
+    else:
         raise HTTPException(403, "Not authorized")
 
-    await records_collection.delete_one(
-        {"_id": ObjectId(record_id)}
-    )
+    # Add deletion metadata
+    record["deleted_at"] = datetime.utcnow()
+    record["deleted_by"] = user["staff_id"]
+    record["original_id"] = record["_id"]
+
+    # Move to deleted collection
+    await records_deleted_collection.insert_one(record)
+
+    # Remove from main collection
+    await records_collection.delete_one({"_id": ObjectId(record_id)})
 
     await log_action(
         action="DELETE",
         performed_by=user["staff_id"],
         record_id=record_id,
-        details=f"Deleted PR/PO {record.get('pr_po_no', '')}"
+        details="Soft deleted record"
     )
 
-    return {"message": "Record deleted"}
+    return {"message": "Record moved to deleted collection"}
+
+# ---------------- END RECORDS (ACTIVE) ---------------- #
+
+# ---------------- RECORDS (DELETED / RESTORE) ---------------- #
+
+# ---------------- VIEW MY DELETED RECORDS ---------------- #
+
+@router.get("/records/deleted")
+async def view_my_deleted_records(user=Depends(get_current_user)):
+
+    if user["role"] == "admin":
+        # Admin sees all
+        records = await records_deleted_collection.find().to_list(1000)
+    else:
+        # Staff sees only their deleted records
+        records = await records_deleted_collection.find(
+            {"staff_id": user["staff_id"]}
+        ).to_list(1000)
+
+    for record in records:
+        record["_id"] = str(record["_id"])
+        record["original_id"] = str(record.get("original_id", ""))
+
+    return records
+
+
+
+
+
+# ---------------- VIEW DELETED RECORDS (ADMIN ONLY) ---------------- #
+
+@router.get("/admin/deleted/records")
+async def view_deleted_records(user=Depends(get_current_user)):
+
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only admin can view deleted records")
+
+    records = await records_deleted_collection.find().to_list(1000)
+
+    for record in records:
+        record["_id"] = str(record["_id"])
+        record["original_id"] = str(record.get("original_id", ""))
+
+    return records
+
+
+# ---------------- RESTORE RECORD (ADMIN + STAFF OWN RECORDS) ---------------- #
+
+@router.post("/records/restore/{record_id}")
+async def restore_record(record_id: str, user=Depends(get_current_user)):
+
+    deleted_record = await records_deleted_collection.find_one(
+        {"original_id": ObjectId(record_id)}
+    )
+
+    if not deleted_record:
+        raise HTTPException(404, "Deleted record not found")
+
+    # Admin can restore any record
+    if user["role"] == "admin":
+        pass
+
+    # Staff can restore only their own records
+    elif user["role"] == "staff":
+        if deleted_record["staff_id"] != user["staff_id"]:
+            raise HTTPException(403, "You can restore only your own records")
+
+    else:
+        raise HTTPException(403, "Not authorized")
+
+    # Remove deletion metadata
+    deleted_record.pop("deleted_at", None)
+    deleted_record.pop("deleted_by", None)
+    deleted_record.pop("original_id", None)
+
+    # Restore to main collection
+    await records_collection.insert_one(deleted_record)
+
+    # Remove from deleted collection
+    await records_deleted_collection.delete_one(
+        {"original_id": ObjectId(record_id)}
+    )
+
+    await log_action(
+        action="RESTORE",
+        performed_by=user["staff_id"],
+        record_id=record_id,
+        details="Record restored"
+    )
+
+    return {"message": "Record restored successfully"}
+
+
+# ---------------- END RECORDS (DELETED / RESTORE) ---------------- #
+
+
+
+# ---------------- STAFF (ACTIVE) ---------------- #
+# ---------------- VIEW ALL STAFF (ADMIN ONLY) ---------------- #
+
+@router.get("/admin/staffs")
+async def get_all_staff(user=Depends(get_current_user)):
+
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only admin can view staff list")
+
+    staffs = await users_collection.find(
+        {"role": "staff"}  # Only staff, exclude admin
+    ).to_list(1000)
+
+    # Remove sensitive fields
+    for staff in staffs:
+        staff["_id"] = str(staff["_id"])
+        staff.pop("password_hash", None)
+
+    return staffs
 
 # ---------------- CREATE STAFF---------------- #
 
@@ -200,3 +334,72 @@ async def create_staff(data: StaffCreate, user=Depends(get_current_user)):
     await users_collection.insert_one(new_staff)
 
     return {"message": "Staff created successfully"}
+
+
+# ---------------- DELETE STAFF---------------- #
+
+@router.delete("/staff/{staff_id}")
+async def delete_staff(staff_id: str, user=Depends(get_current_user)):
+
+    if user["role"] != "admin":
+        raise HTTPException(403, "Only admin can delete staff")
+
+    staff = await users_collection.find_one({"staff_id": staff_id})
+
+    if not staff:
+        raise HTTPException(404, "Staff not found")
+
+    from datetime import datetime
+
+    staff["deleted_at"] = datetime.utcnow()
+    staff["deleted_by"] = user["staff_id"]
+
+    await users_deleted_collection.insert_one(staff)
+    await users_collection.delete_one({"staff_id": staff_id})
+
+    return {"message": "Staff moved to deleted collection"}
+
+
+# ---------------- END STAFF (ACTIVE) ---------------- #
+
+
+# ---------------- STAFF (DELETED / RESTORE) ---------------- #
+
+# ---------------- VIEW DELETED STAFF (ADMIN ONLY) ---------------- #
+
+@router.get("/admin/deleted/staffs")
+async def view_deleted_staff(user=Depends(get_current_user)):
+
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only admin can view deleted staff")
+
+    staffs = await users_deleted_collection.find().to_list(1000)
+
+    for staff in staffs:
+        staff["_id"] = str(staff["_id"])
+        staff.pop("password_hash", None)
+
+    return staffs
+
+# ---------------- RESTORE STAFF---------------- #
+@router.post("/staff/restore/{staff_id}")
+async def restore_staff(staff_id: str, user=Depends(get_current_user)):
+
+    if user["role"] != "admin":
+        raise HTTPException(403, "Only admin can restore staff")
+
+    staff = await users_deleted_collection.find_one({"staff_id": staff_id})
+
+    if not staff:
+        raise HTTPException(404, "Deleted staff not found")
+
+    staff.pop("deleted_at", None)
+    staff.pop("deleted_by", None)
+
+    await users_collection.insert_one(staff)
+    await users_deleted_collection.delete_one({"staff_id": staff_id})
+
+    return {"message": "Staff restored successfully"}
+
+
+# ---------------- END STAFF (DELETED / RESTORE) ---------------- #
