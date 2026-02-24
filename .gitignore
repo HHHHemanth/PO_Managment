@@ -5,3 +5,7 @@ __pycache__/
 *.pyo
 *.pyd
 *.log
+passwordhashing.py
+entries.xlsx
+output.json
+json_create.py

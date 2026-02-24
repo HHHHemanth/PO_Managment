@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel,  Field
 from typing import Optional
 from pydantic import BaseModel, field_validator
 from typing import Optional
@@ -47,3 +47,40 @@ class StaffCreate(BaseModel):
     staff_id: str
     name: str
     password: str
+
+class WorkCreate(BaseModel):
+    staff_id: str
+    project_name: str
+    objective: str
+    task: str
+    description: str
+    allocated_time: datetime
+    deadline_time: datetime
+
+
+
+class WorkProgressUpdate(BaseModel):
+    progress_description: str = Field(..., min_length=1)
+
+
+
+class WorkDelayUpdate(BaseModel):
+    reason: str = Field(..., min_length=1)
+
+
+
+class WorkDocumentResponse(BaseModel):
+    document_id: str
+    work_id: str
+    public_url: str
+    status: str
+    uploaded_by: str
+    uploaded_at: datetime
+
+class WorkUpdate(BaseModel):
+    project_name: Optional[str] = None
+    objective: Optional[str] = None
+    task: Optional[str] = None
+    description: Optional[str] = None
+    allocated_time: Optional[datetime] = None
+    deadline_time: Optional[datetime] = None

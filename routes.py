@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
-from database import users_collection, records_collection, records_deleted_collection, users_deleted_collection, document_links_collection
-from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate
+from database import users_collection, records_collection, records_deleted_collection, users_deleted_collection, document_links_collection, work_collection, work_document_collection
+from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate, WorkCreate, WorkProgressUpdate, WorkDelayUpdate, WorkUpdate
 from auth import verify_password, create_token
 from audit import log_action
 
@@ -8,11 +8,15 @@ from bson import ObjectId
 from jose import jwt
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import os
+import uuid
 
 from datetime import datetime
 from fastapi import UploadFile, File, Form
 import uuid
 from supabase_client import supabase
+
+import re
+
 router = APIRouter()
 
 # JWT Security setup
@@ -20,6 +24,10 @@ security = HTTPBearer()
 
 SECRET = os.getenv("JWT_SECRET")
 ALGORITHM = os.getenv("JWT_ALGORITHM")
+
+def sanitize_folder_name(pr_po_no: str):
+    # Replace all unsafe characters with underscore
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", pr_po_no)
 
 
 # ✅ DEFINE THIS FIRST (before routes use it)
@@ -36,6 +44,30 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
             status_code=401,
             detail="Invalid or expired token"
         )
+
+
+def calculate_status(allocated, deadline):
+    now = datetime.utcnow()
+    total = (deadline - allocated).total_seconds()
+    elapsed = (now - allocated).total_seconds()
+
+    if total <= 0:
+        return "red"
+
+    ratio = elapsed / total
+
+    if ratio <= 1/3:
+        return "green"
+    elif ratio <= 2/3:
+        return "yellow"
+    else:
+        return "red"
+
+
+
+
+
+
 
 # ---------------- AUTH ---------------- #
 # ---------------- LOGIN ROUTES ---------------- #
@@ -430,7 +462,7 @@ async def upload_document(
     if user["role"] == "staff" and record["staff_id"] != user["staff_id"]:
         raise HTTPException(403, "Not authorized")
 
-    pr_po_no = record["pr_po_no"]
+    safe_pr_po_no = sanitize_folder_name(record["pr_po_no"])
 
     # Validate file type
     allowed_types = ["application/pdf", "image/jpeg", "image/png"]
@@ -456,14 +488,17 @@ async def upload_document(
     file_extension = file.filename.split(".")[-1]
     file_name = f"{document_name}.{file_extension}"
 
-    file_path = f"{pr_po_no}/{file_name}"
+    file_path = f"{safe_pr_po_no}/{file_name}"
 
     # Upload to Supabase
     file_bytes = await file.read()
 
     supabase.storage.from_("PO_Managment_Documents").upload(
         file_path,
-        file_bytes
+        file_bytes,
+        {
+            "content-type": file.content_type
+        }
     )
 
     public_url = supabase.storage.from_("PO_Managment_Documents").get_public_url(file_path)
@@ -472,7 +507,7 @@ async def upload_document(
     document_data = {
         "document_id": document_id,
         "record_id": ObjectId(record_id),
-        "pr_po_no": pr_po_no,
+        "pr_po_no": safe_pr_po_no,
         "document_name": document_name,
         "file_extension": file_extension,
         "file_path": file_path,
@@ -561,3 +596,325 @@ async def list_documents(record_id: str, user=Depends(get_current_user)):
         doc["record_id"] = str(doc["record_id"])
 
     return documents
+
+
+
+@router.get("/works", tags=["Taskbar"])
+async def get_works(user=Depends(get_current_user)):
+
+    if user["role"] == "admin":
+        works = await work_collection.find().to_list(1000)
+
+    elif user["role"] == "staff":
+        works = await work_collection.find({
+            "staff_id": {"$in": user.get("supervises", [])}
+        }).to_list(1000)
+
+    elif user["role"] == "project_associate":
+        works = await work_collection.find({
+            "staff_id": user["staff_id"]
+        }).to_list(1000)
+
+    else:
+        raise HTTPException(403, "Unauthorized")
+
+    for work in works:
+        work["_id"] = str(work["_id"])
+
+        # Auto compute status
+        work["status"] = calculate_status(
+            work["allocated_time"],
+            work["deadline_time"]
+        )
+
+    return works
+
+
+
+@router.post("/works", tags=["Taskbar"])
+async def create_work(data: WorkCreate, user=Depends(get_current_user)):
+
+    if user["role"] not in ["admin", "staff"]:
+        raise HTTPException(403, "Only admin or staff can create work")
+
+    associate = await users_collection.find_one({
+        "staff_id": data.staff_id,
+        "role": "project_associate"
+    })
+
+    if not associate:
+        raise HTTPException(404, "Project associate not found")
+
+    if user["role"] == "staff":
+        if data.staff_id not in user.get("supervises", []):
+            raise HTTPException(403, "Not allowed to assign this associate")
+
+    work_id = str(uuid.uuid4())
+
+    work_data = {
+        "work_id": work_id,
+        "staff_id": data.staff_id,
+        "associate_name": associate["name"],
+
+        "project_name": data.project_name,
+        "objective": data.objective,
+        "task": data.task,
+        "description": data.description,
+
+        "allocated_time": data.allocated_time,
+        "deadline_time": data.deadline_time,
+
+        "progress_description": "",
+        "reason_for_delay": None,
+
+        "created_by": user["staff_id"],
+        "created_at": datetime.utcnow()
+    }
+
+    await work_collection.insert_one(work_data)
+
+    return {"message": "Work created", "work_id": work_id}
+@router.put("/works/{work_id}", tags=["Taskbar"])
+async def update_work(
+    work_id: str,
+    data: WorkUpdate,
+    user=Depends(get_current_user)
+):
+
+    work = await work_collection.find_one({"work_id": work_id})
+
+    if not work:
+        raise HTTPException(404, "Work not found")
+
+    # Admin can edit anything
+    if user["role"] == "admin":
+        pass
+
+    # Staff can edit only works they created
+    elif user["role"] == "staff":
+        if work["created_by"] != user["staff_id"]:
+            raise HTTPException(403, "Not allowed to edit this work")
+
+    # Project associate can edit only their work
+    elif user["role"] == "project_associate":
+        if work["staff_id"] != user["staff_id"]:
+            raise HTTPException(403, "Not your work")
+
+    else:
+        raise HTTPException(403, "Unauthorized")
+
+    update_data = data.dict(exclude_unset=True)
+
+    if not update_data:
+        raise HTTPException(400, "No fields provided for update")
+
+    await work_collection.update_one(
+        {"work_id": work_id},
+        {"$set": update_data}
+    )
+
+    return {"message": "Work updated successfully"}
+
+
+@router.put("/works/{work_id}/progress", tags=["Taskbar"])
+async def update_progress(
+    work_id: str,
+    data: WorkProgressUpdate,
+    user=Depends(get_current_user)
+):
+
+    if user["role"] != "project_associate":
+        raise HTTPException(403, "Only associate can update progress")
+
+    work = await work_collection.find_one({"work_id": work_id})
+
+    if not work:
+        raise HTTPException(404, "Work not found")
+
+    if work["staff_id"] != user["staff_id"]:
+        raise HTTPException(403, "Not your work")
+
+    await work_collection.update_one(
+        {"work_id": work_id},
+        {"$set": {"progress_description": data.progress_description}}
+    )
+
+    return {"message": "Progress updated"}
+
+
+@router.put("/works/{work_id}/delay", tags=["Taskbar"])
+async def add_delay_reason(
+    work_id: str,
+    data: WorkDelayUpdate,
+    user=Depends(get_current_user)
+):
+
+    work = await work_collection.find_one({"work_id": work_id})
+
+    if not work:
+        raise HTTPException(404, "Work not found")
+
+    if user["role"] != "project_associate":
+        raise HTTPException(403, "Only associate can add delay reason")
+
+    if datetime.utcnow() < work["deadline_time"]:
+        raise HTTPException(400, "Deadline not reached yet")
+
+    await work_collection.update_one(
+        {"work_id": work_id},
+        {"$set": {"reason_for_delay": data.reason}}
+    )
+
+    return {"message": "Delay reason added"}
+
+
+
+@router.post("/works/{work_id}/upload", tags=["Taskbar"])
+async def upload_work_document(
+    work_id: str,
+    document_name: str = Form(...),
+    file: UploadFile = File(...),
+    user=Depends(get_current_user)
+):
+
+    work = await work_collection.find_one({"work_id": work_id})
+
+    if not work:
+        raise HTTPException(404, "Work not found")
+
+    # ---------------- PERMISSION LOGIC ---------------- #
+
+    if user["role"] == "admin":
+        pass
+
+    elif user["role"] == "staff":
+        # Staff can upload only if they created or supervise this work
+        if work["created_by"] != user["staff_id"]:
+            raise HTTPException(403, "Not allowed")
+
+    elif user["role"] == "project_associate":
+        if work["staff_id"] != user["staff_id"]:
+            raise HTTPException(403, "Not your work")
+
+    else:
+        raise HTTPException(403, "Unauthorized")
+
+    # ---------------- FILE VALIDATION ---------------- #
+
+    allowed_types = ["pdf", "png", "jpg", "jpeg"]
+    file_extension = file.filename.split(".")[-1].lower()
+
+    if file_extension not in allowed_types:
+        raise HTTPException(400, "Only PDF/JPEG/PNG allowed")
+
+    # ---------------- DUPLICATE NAME CHECK ---------------- #
+
+    existing = await work_document_collection.find_one({
+        "work_id": work_id,
+        "file_path": {"$regex": f"/{document_name}\\."},
+        "status": "active"
+    })
+
+    if existing:
+        raise HTTPException(400, "Document name already exists")
+
+    # ---------------- UPLOAD ---------------- #
+
+
+    staff_id = work["staff_id"]
+
+    file_path = f"works/{staff_id}/{work_id}/{document_name}.{file_extension}"
+    file_bytes = await file.read()
+
+    supabase.storage.from_("PO_Managment_Documents").upload(
+        file_path,
+        file_bytes
+    )
+
+    public_url = supabase.storage.from_("PO_Managment_Documents").get_public_url(file_path)
+
+    document_id = str(uuid.uuid4())
+
+    await work_document_collection.insert_one({
+        "document_id": document_id,
+        "work_id": work_id,
+        "file_path": file_path,
+        "public_url": public_url,
+        "status": "active",
+        "uploaded_by": user.get("staff_id", user.get("staff_id")),
+        "uploaded_at": datetime.utcnow()
+    })
+
+    return {"message": "Document uploaded", "document_id": document_id}
+
+@router.get("/works/{work_id}/documents", tags=["Taskbar"])
+async def list_work_documents(work_id: str, user=Depends(get_current_user)):
+
+    # 1️⃣ Check work exists
+    work = await work_collection.find_one({"work_id": work_id})
+
+    if not work:
+        raise HTTPException(404, "Work not found")
+
+    # 2️⃣ Permission Logic
+
+    if user["role"] == "admin":
+        pass
+
+    elif user["role"] == "staff":
+        # staff can see only works they created
+        if work["created_by"] != user["staff_id"]:
+            raise HTTPException(403, "Not allowed")
+
+    elif user["role"] == "project_associate":
+        # associate can see only their own works
+        if work["staff_id"] != user["staff_id"]:
+            raise HTTPException(403, "Not your work")
+
+    else:
+        raise HTTPException(403, "Unauthorized")
+
+    # 3️⃣ Fetch documents
+    documents = await work_document_collection.find({
+        "work_id": work_id,
+        "status": "active"
+    }).to_list(100)
+
+    for doc in documents:
+        doc["_id"] = str(doc["_id"])
+
+    return documents
+
+
+@router.delete("/work-documents/{document_id}", tags=["Taskbar"])
+async def delete_work_document(document_id: str, user=Depends(get_current_user)):
+
+    document = await work_document_collection.find_one({
+        "document_id": document_id,
+        "status": "active"
+    })
+
+    if not document:
+        raise HTTPException(404, "Document not found")
+
+    uploader = document["uploaded_by"]
+
+    # Identify current user ID safely
+    current_user_id = (
+        user.get("staff_id")
+    )
+
+    # Allow delete ONLY if uploader matches
+    if uploader != current_user_id:
+        raise HTTPException(
+            status_code=403,
+            detail=f"This document was uploaded by '{uploader}'. Only the uploader can delete it."
+        )
+
+    # Soft delete
+    await work_document_collection.update_one(
+        {"document_id": document_id},
+        {"$set": {"status": "deleted"}}
+    )
+
+    return {"message": "Document deleted successfully"}

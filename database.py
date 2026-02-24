@@ -30,3 +30,5 @@ audit_logs_collection = db.audit_logs
 users_deleted_collection = db.users_deleted
 records_deleted_collection = db.records_deleted
 document_links_collection = db.document_links
+work_collection = db["work"]
+work_document_collection = db["work_document"]
