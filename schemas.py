@@ -1,7 +1,8 @@
 from pydantic import BaseModel,  Field
 from typing import Optional
 from pydantic import BaseModel, field_validator
-from typing import Optional
+from typing import Optional, List
+
 from datetime import datetime
 
 class LoginAdmin(BaseModel):
@@ -84,3 +85,7 @@ class WorkUpdate(BaseModel):
     description: Optional[str] = None
     allocated_time: Optional[datetime] = None
     deadline_time: Optional[datetime] = None
+
+class ProjectAssociateUpdate(BaseModel):
+    is_active: Optional[bool] = None
+    assigned_staff: Optional[List[str]] = None

@@ -25,6 +25,10 @@ app = FastAPI(
             "description": "Admin controls for managing staff accounts"
         },
         {
+            "name": "Project Associate Management",
+            "description": "Admin controls for managing project associate accounts"
+        },
+        {
             "name": "Documents",
             "description": "File upload, view and soft delete using Supabase"
         },
