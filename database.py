@@ -7,12 +7,8 @@ MONGO_URL = os.getenv("MONGO_URL")
 
 client = AsyncIOMotorClient(
     MONGO_URL,
-    tls=True,
     tlsCAFile=certifi.where(),
-    tlsAllowInvalidCertificates=False,
-    serverSelectionTimeoutMS=30000,
-    connectTimeoutMS=30000,
-    socketTimeoutMS=30000
+    serverSelectionTimeoutMS=30000
 )
 
 # Force connection on startup

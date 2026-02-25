@@ -227,16 +227,11 @@ async def delete_record(record_id: str, user=Depends(get_current_user)):
 
     # Staff can delete only their own records
     elif user["role"] == "staff":
-
-        associate = await users_collection.find_one({
-            "staff_id": work["staff_id"],
-            "role": "project_associate",
-            "assigned_staff": user["staff_id"],
-            "is_active": True
-        })
-
-    if not associate:
-        raise HTTPException(403, "You can delete only works of your associates")
+        if record["staff_id"] != user["staff_id"]:
+            raise HTTPException(
+                403,
+                "You can delete only your own records"
+            )
 
     else:
         raise HTTPException(403, "Not authorized")
@@ -260,6 +255,7 @@ async def delete_record(record_id: str, user=Depends(get_current_user)):
     )
 
     return {"message": "Record moved to deleted collection"}
+
 
 # ---------------- END RECORDS (ACTIVE) ---------------- #
 
