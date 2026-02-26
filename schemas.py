@@ -89,3 +89,7 @@ class WorkUpdate(BaseModel):
 class ProjectAssociateUpdate(BaseModel):
     is_active: Optional[bool] = None
     assigned_staff: Optional[List[str]] = None
+
+class LoginProjectAssociate(BaseModel):
+    staff_id: str
+    password: str

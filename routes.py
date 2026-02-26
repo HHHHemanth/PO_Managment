@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from database import users_collection, records_collection, records_deleted_collection, users_deleted_collection, document_links_collection, work_collection, work_document_collection
-from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate, WorkCreate, WorkProgressUpdate, WorkDelayUpdate, WorkUpdate, ProjectAssociateUpdate
+from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate, WorkCreate, WorkProgressUpdate, WorkDelayUpdate, WorkUpdate, ProjectAssociateUpdate, LoginProjectAssociate
 from auth import verify_password, create_token
 from audit import log_action
 
@@ -10,7 +10,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import os
 import uuid
 
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import UploadFile, File, Form
 import uuid
 from supabase_client import supabase
@@ -132,6 +132,35 @@ async def staff_login(data: LoginStaff):
     })
 
     return {"token": token, "staff_id": data.staff_id, "name": staff["name"], "role": staff["role"]}
+
+
+
+@router.post("/login/project-associate", tags=["Authentication"])
+async def project_associate_login(data: LoginProjectAssociate):
+
+    associate = await users_collection.find_one({
+        "staff_id": data.staff_id,
+        "role": "project_associate",
+        "is_active": True
+    })
+
+    if not associate:
+        raise HTTPException(status_code=404, detail="Project associate not found")
+
+    if not verify_password(data.password, associate["password_hash"]):
+        raise HTTPException(status_code=401, detail="Wrong password")
+
+    token = create_token({
+        "role": "project_associate",
+        "staff_id": associate["staff_id"]
+    })
+
+    return {
+        "token": token,
+        "staff_id": associate["staff_id"],
+        "name": associate["name"],
+        "role": associate["role"]
+    }
 
 # ---------------- END AUTH ---------------- #
 
@@ -998,7 +1027,10 @@ async def add_delay_reason(
     if user["role"] != "project_associate":
         raise HTTPException(403, "Only associate can add delay reason")
 
-    if datetime.utcnow() < work["deadline_time"]:
+    if work["staff_id"] != user["staff_id"]:
+        raise HTTPException(403, "Not your work")
+
+    if datetime.now(timezone.utc) < work["deadline_time"]:
         raise HTTPException(400, "Deadline not reached yet")
 
     await work_collection.update_one(
