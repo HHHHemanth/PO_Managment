@@ -1030,7 +1030,7 @@ async def add_delay_reason(
     if work["staff_id"] != user["staff_id"]:
         raise HTTPException(403, "Not your work")
 
-    if datetime.now(timezone.utc) < work["deadline_time"]:
+    if datetime.utcnow() < work["deadline_time"]:
         raise HTTPException(400, "Deadline not reached yet")
 
     await work_collection.update_one(
