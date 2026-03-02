@@ -28,3 +28,4 @@ records_deleted_collection = db.records_deleted
 document_links_collection = db.document_links
 work_collection = db["work"]
 work_document_collection = db["work_document"]
+project_associate_deleted_collection = db["project_associate_deleted"]

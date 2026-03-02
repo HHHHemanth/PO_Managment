@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends
-from database import users_collection, records_collection, records_deleted_collection, users_deleted_collection, document_links_collection, work_collection, work_document_collection
+from database import users_collection, records_collection, records_deleted_collection, users_deleted_collection, document_links_collection, work_collection, work_document_collection, project_associate_deleted_collection
 from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate, WorkCreate, WorkProgressUpdate, WorkDelayUpdate, WorkUpdate, ProjectAssociateUpdate, LoginProjectAssociate
 from auth import verify_password, create_token
 from audit import log_action
@@ -556,6 +556,7 @@ async def update_project_associate(
 
 @router.delete("/admin/project-associate/{staff_id}", tags=["Project Associate Management"])
 async def delete_project_associate(staff_id: str, user=Depends(get_current_user)):
+
     if user["role"] != "admin":
         raise HTTPException(403, "Only admin can delete")
 
@@ -566,16 +567,34 @@ async def delete_project_associate(staff_id: str, user=Depends(get_current_user)
 
     if not associate:
         raise HTTPException(404, "Project associate not found")
+
+    # Soft delete metadata
     associate["is_active"] = False
     associate["deleted_at"] = datetime.utcnow()
     associate["deleted_by"] = user["staff_id"]
 
-    await users_deleted_collection.insert_one(associate)
+    # ✅ Move to project_associate_deleted collection
+    await project_associate_deleted_collection.insert_one(associate)
+
+    # Remove from active users collection
     await users_collection.delete_one({"staff_id": staff_id})
 
-    return {"message": "Project associate soft deleted"}
+    return {"message": "Project associate moved to project_associate_deleted collection"}
 
 
+@router.get("/admin/deleted/project-associates", tags=["Project Associate Management"])
+async def view_deleted_project_associates(user=Depends(get_current_user)):
+
+    if user["role"] != "admin":
+        raise HTTPException(403, "Only admin allowed")
+
+    associates = await project_associate_deleted_collection.find().to_list(1000)
+
+    for a in associates:
+        a["_id"] = str(a["_id"])
+        a.pop("password_hash", None)
+
+    return associates
 
 
 
@@ -584,19 +603,24 @@ async def restore_project_associate(staff_id: str, user=Depends(get_current_user
 
     if user["role"] != "admin":
         raise HTTPException(403, "Only admin can restore")
-    associate = await users_deleted_collection.find_one({
+
+    associate = await project_associate_deleted_collection.find_one({
         "staff_id": staff_id,
         "role": "project_associate"
     })
 
     if not associate:
         raise HTTPException(404, "Deleted associate not found")
+
     associate["is_active"] = True
     associate.pop("deleted_at", None)
     associate.pop("deleted_by", None)
 
+    # Move back to users
     await users_collection.insert_one(associate)
-    await users_deleted_collection.delete_one({"staff_id": staff_id})
+
+    # Remove from deleted collection
+    await project_associate_deleted_collection.delete_one({"staff_id": staff_id})
 
     return {"message": "Project associate restored successfully"}
 
