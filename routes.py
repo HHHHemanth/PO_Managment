@@ -410,6 +410,10 @@ async def create_staff(data: StaffCreate, user=Depends(get_current_user)):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Only admin can create staff")
 
+    existing = await users_collection.find_one({"staff_id": data.staff_id})
+    if existing:
+        raise HTTPException(400, "Staff ID already exists")
+
     from auth import hash_password
 
     hashed = hash_password(data.password)
