@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from database import users_collection, records_collection, records_deleted_collection, users_deleted_collection, document_links_collection, work_collection, work_document_collection, project_associate_deleted_collection
-from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate, WorkCreate, WorkProgressUpdate, WorkDelayUpdate, WorkUpdate, ProjectAssociateUpdate, LoginProjectAssociate
+from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate, WorkCreate, WorkProgressUpdate, WorkDelayUpdate, WorkSuggestionUpdate, WorkUpdate, ProjectAssociateUpdate, LoginProjectAssociate
 from auth import verify_password, create_token
 from audit import log_action
 
@@ -898,6 +898,13 @@ async def get_works(user=Depends(get_current_user)):
             work["deadline_time"]
         )
 
+        # Calculate remaining due time
+        remaining_seconds = (work["deadline_time"] - datetime.utcnow()).total_seconds()
+
+        remaining_days = max(0, int(remaining_seconds // 86400))  # 86400 sec = 1 day
+
+        work["due_time_days"] = remaining_days
+
     return works
 
 
@@ -941,6 +948,8 @@ async def create_work(data: WorkCreate, user=Depends(get_current_user)):
         "objective": data.objective,
         "task": data.task,
         "description": data.description,
+
+        "suggestion": "",
 
         "allocated_time": data.allocated_time,
         "deadline_time": data.deadline_time,
@@ -1038,6 +1047,50 @@ async def update_progress(
     )
 
     return {"message": "Progress updated"}
+
+
+@router.put("/works/{work_id}/suggestion", tags=["Taskbar"])
+async def update_suggestion(
+    work_id: str,
+    data: WorkSuggestionUpdate,
+    user=Depends(get_current_user)
+):
+
+    work = await work_collection.find_one({"work_id": work_id})
+
+    if not work:
+        raise HTTPException(404, "Work not found")
+
+    if user["role"] == "admin":
+        pass
+
+    elif user["role"] == "staff":
+
+        associate = await users_collection.find_one({
+            "staff_id": work["staff_id"],
+            "role": "project_associate",
+            "assigned_staff": user["staff_id"],
+            "is_active": True
+        })
+
+        if not associate:
+            raise HTTPException(
+                403,
+                "You can update suggestion only for your associates"
+            )
+
+    else:
+        raise HTTPException(
+            403,
+            "Only admin or assigned staff can update suggestion"
+        )
+
+    await work_collection.update_one(
+        {"work_id": work_id},
+        {"$set": {"suggestion": data.suggestion}}
+    )
+
+    return {"message": "Suggestion updated successfully"}
 
 
 @router.put("/works/{work_id}/delay", tags=["Taskbar"])

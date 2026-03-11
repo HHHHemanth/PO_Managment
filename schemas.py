@@ -68,7 +68,8 @@ class WorkProgressUpdate(BaseModel):
 class WorkDelayUpdate(BaseModel):
     reason: str = Field(..., min_length=1)
 
-
+class WorkSuggestionUpdate(BaseModel):
+    suggestion: str = Field(..., min_length=1)
 
 class WorkDocumentResponse(BaseModel):
     document_id: str
