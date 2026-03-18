@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
-from database import users_collection, records_collection, records_deleted_collection, users_deleted_collection, document_links_collection, work_collection, work_document_collection, project_associate_deleted_collection
-from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate, WorkCreate, WorkProgressUpdate, WorkDelayUpdate, WorkSuggestionUpdate, WorkUpdate, ProjectAssociateUpdate, LoginProjectAssociate
+from database import users_collection, records_collection, records_deleted_collection, users_deleted_collection, document_links_collection, work_collection, work_document_collection, project_associate_deleted_collection,  password_change_logs_collection  
+from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate, WorkCreate, WorkProgressUpdate, WorkDelayUpdate, WorkSuggestionUpdate, WorkUpdate, ProjectAssociateUpdate, LoginProjectAssociate, PasswordChangeRequest
 from auth import verify_password, create_token
 from audit import log_action
 
@@ -161,6 +161,60 @@ async def project_associate_login(data: LoginProjectAssociate):
         "name": associate["name"],
         "role": associate["role"]
     }
+
+
+@router.put("/change-password", tags=["Authentication"])
+async def change_password(
+    data: PasswordChangeRequest,
+    user=Depends(get_current_user)
+):
+
+    from auth import hash_password
+
+    # ---------------- USER FETCH ---------------- #
+
+    target_user = await users_collection.find_one({
+        "staff_id": data.staff_id
+    })
+
+    if not target_user:
+        raise HTTPException(404, "User not found")
+
+    # ---------------- PERMISSION ---------------- #
+
+    # Admin → can change anyone
+    if user["role"] == "admin":
+        pass
+
+    # Others → only themselves
+    elif user["staff_id"] == data.staff_id:
+        pass
+
+    else:
+        raise HTTPException(
+            403,
+            "You can change only your own password"
+        )
+
+    # ---------------- UPDATE PASSWORD ---------------- #
+
+    new_hashed = hash_password(data.new_password)
+
+    await users_collection.update_one(
+        {"staff_id": data.staff_id},
+        {"$set": {"password_hash": new_hashed}}
+    )
+
+    # ---------------- LOGGING ---------------- #
+
+    await password_change_logs_collection.insert_one({
+        "staff_id": data.staff_id,
+        "changed_by": user["staff_id"],
+        "changer_role": user["role"],
+        "changed_at": datetime.utcnow()
+    })
+
+    return {"message": "Password updated successfully"}
 
 # ---------------- END AUTH ---------------- #
 
@@ -421,6 +475,7 @@ async def create_staff(data: StaffCreate, user=Depends(get_current_user)):
     new_staff = {
         "staff_id": data.staff_id,
         "name": data.name,
+        "email": data.email if data.email else None,
         "password_hash": hashed,
         "role": "staff",
         "is_active": True
@@ -513,6 +568,7 @@ async def create_project_associate(data: StaffCreate, user=Depends(get_current_u
     new_associate = {
         "staff_id": data.staff_id,
         "name": data.name,
+        "email": data.email if data.email else None,
         "password_hash": hash_password(data.password),
         "role": "project_associate",
         "is_active": True,

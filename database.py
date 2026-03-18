@@ -29,3 +29,4 @@ document_links_collection = db.document_links
 work_collection = db["work"]
 work_document_collection = db["work_document"]
 project_associate_deleted_collection = db["project_associate_deleted"]
+password_change_logs_collection = db["password_change_logs"]

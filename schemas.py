@@ -2,7 +2,7 @@ from pydantic import BaseModel,  Field
 from typing import Optional
 from pydantic import BaseModel, field_validator
 from typing import Optional, List
-
+from pydantic import EmailStr
 from datetime import datetime
 
 class LoginAdmin(BaseModel):
@@ -48,6 +48,7 @@ class StaffCreate(BaseModel):
     staff_id: str
     name: str
     password: str
+    email: Optional[EmailStr] = None
 
 class WorkCreate(BaseModel):
     staff_id: str
@@ -94,3 +95,7 @@ class ProjectAssociateUpdate(BaseModel):
 class LoginProjectAssociate(BaseModel):
     staff_id: str
     password: str
+
+class PasswordChangeRequest(BaseModel):
+    staff_id: str
+    new_password: str = Field(..., min_length=4)
