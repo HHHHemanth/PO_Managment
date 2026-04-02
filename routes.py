@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from database import users_collection, records_collection, records_deleted_collection, users_deleted_collection, document_links_collection, work_collection, work_document_collection, project_associate_deleted_collection,  password_change_logs_collection  
-from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate, WorkCreate, WorkProgressUpdate, WorkDelayUpdate, WorkSuggestionUpdate, WorkUpdate, ProjectAssociateUpdate, LoginProjectAssociate, PasswordChangeRequest
+from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate, WorkCreate, WorkProgressUpdate, WorkDelayUpdate, WorkSuggestionUpdate, WorkUpdate, ProjectAssociateUpdate, LoginProjectAssociate, PasswordChangeRequest, WorkProgressValueUpdate
 from auth import verify_password, create_token
 from audit import log_action
 
@@ -10,7 +10,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import os
 import uuid
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from fastapi import UploadFile, File, Form
 import uuid
 from supabase_client import supabase
@@ -961,6 +961,14 @@ async def get_works(user=Depends(get_current_user)):
 
         work["due_time_days"] = remaining_days
 
+    if work.get("extension_requested_at"):
+
+        request_time = work["extension_requested_at"]
+
+        # Example: after 1 day → auto activate
+        if (datetime.utcnow() - request_time).total_seconds() > 86400:
+            work["status2"] = "Extension Requested"
+
     return works
 
 
@@ -1007,6 +1015,8 @@ async def create_work(data: WorkCreate, user=Depends(get_current_user)):
 
         "suggestion": "",
 
+        "progress": 0,
+
         "allocated_time": data.allocated_time,
         "deadline_time": data.deadline_time,
 
@@ -1015,7 +1025,21 @@ async def create_work(data: WorkCreate, user=Depends(get_current_user)):
 
         "created_by": user["staff_id"],
         "created_role": user["role"],
-        "created_at": datetime.utcnow()
+        "created_at": datetime.utcnow(),
+
+        "status": "green",  # already exists via calculation
+
+        # NEW FIELD
+        "status2": "Pending",  # In Progress / Completed / Delayed / Pending / Extension Requested
+
+        # EXTENSION SYSTEM
+        "extension_requested": False,
+        "extension_reason": None,
+        "extension_requested_at": None,
+
+        "extension_status": None,  # pending / approved / rejected
+        "extension_days": None,
+        "extended_deadline": None
     }
 
     await work_collection.insert_one(work_data)
@@ -1105,6 +1129,29 @@ async def update_progress(
     return {"message": "Progress updated"}
 
 
+@router.put("/works/{work_id}/progress-value", tags=["Taskbar"])
+async def update_progress_value(
+    work_id: str,
+    data: WorkProgressValueUpdate,
+    user=Depends(get_current_user)
+):
+
+    work = await work_collection.find_one({"work_id": work_id})
+
+    if not work:
+        raise HTTPException(404, "Work not found")
+
+    # ✅ Permission check (reuse your logic)
+    if not await can_staff_access_work(user, work):
+        raise HTTPException(403, "Not authorized")
+
+    await work_collection.update_one(
+        {"work_id": work_id},
+        {"$set": {"progress": data.progress}}
+    )
+
+    return {"message": "Progress value updated"}
+
 @router.put("/works/{work_id}/suggestion", tags=["Taskbar"])
 async def update_suggestion(
     work_id: str,
@@ -1178,6 +1225,156 @@ async def add_delay_reason(
     return {"message": "Delay reason added"}
 
 
+@router.post("/works/{work_id}/request-extension", tags=["Taskbar"])
+async def request_extension(work_id: str, reason: str, user=Depends(get_current_user)):
+
+    if user["role"] != "project_associate":
+        raise HTTPException(403, "Only associate can request extension")
+
+    work = await work_collection.find_one({"work_id": work_id})
+
+    if not work:
+        raise HTTPException(404, "Work not found")
+
+    if work["staff_id"] != user["staff_id"]:
+        raise HTTPException(403, "Not your work")
+
+    # ✅ CALCULATE CURRENT STATUS (same logic as GET)
+    current_status = calculate_status(
+        work["allocated_time"],
+        work["deadline_time"]
+    )
+
+    # ❌ BLOCK IF NOT RED
+    if current_status != "red":
+        raise HTTPException(
+            status_code=400,
+            detail="Extension can only be requested when work status is RED"
+        )
+
+    # ✅ ALLOW REQUEST
+    await work_collection.update_one(
+        {"work_id": work_id},
+        {
+            "$set": {
+                "extension_requested": True,
+                "extension_reason": reason,
+                "extension_requested_at": datetime.utcnow(),
+                "extension_status": "pending",
+                "status2": "Extension Requested"
+            }
+        }
+    )
+
+    return {"message": "Extension requested successfully"}
+
+@router.get("/works/extensions", tags=["Taskbar"])
+async def view_extension_requests(user=Depends(get_current_user)):
+
+    # ---------------- ADMIN ---------------- #
+    if user["role"] == "admin":
+
+        works = await work_collection.find({
+            "extension_requested": True
+        }).to_list(1000)
+
+    # ---------------- STAFF ---------------- #
+    elif user["role"] == "staff":
+
+        # Get associates under this staff
+        associates = await users_collection.find({
+            "role": "project_associate",
+            "assigned_staff": user["staff_id"],
+            "is_active": True
+        }).to_list(1000)
+
+        associate_ids = [a["staff_id"] for a in associates]
+
+        works = await work_collection.find({
+            "staff_id": {"$in": associate_ids},
+            "extension_requested": True
+        }).to_list(1000)
+
+    else:
+        raise HTTPException(403, "Only admin or staff allowed")
+
+    # ---------------- RESPONSE CLEANUP ---------------- #
+    for work in works:
+        work["_id"] = str(work["_id"])
+
+        # Optional: show useful summary fields
+        work["status"] = calculate_status(
+            work["allocated_time"],
+            work["deadline_time"]
+        )
+
+    return works
+
+@router.put("/works/{work_id}/handle-extension", tags=["Taskbar"])
+async def handle_extension(
+    work_id: str,
+    approve: bool,
+    days: int = 0,
+    user=Depends(get_current_user)
+):
+
+    work = await work_collection.find_one({"work_id": work_id})
+
+    if not work:
+        raise HTTPException(404, "Work not found")
+
+    if not await can_staff_access_work(user, work):
+        raise HTTPException(403, "Not authorized")
+
+    if not work.get("extension_requested"):
+        raise HTTPException(400, "No extension requested")
+
+    if approve:
+        new_deadline = work["deadline_time"] + timedelta(days=days)
+
+        await work_collection.update_one(
+            {"work_id": work_id},
+            {
+                "$set": {
+                    "extension_status": "approved",
+                    "extension_days": days,
+                    "extended_deadline": new_deadline,
+                    "deadline_time": new_deadline,
+                    "status2": "In Progress"
+                }
+            }
+        )
+    else:
+        await work_collection.update_one(
+            {"work_id": work_id},
+            {
+                "$set": {
+                    "extension_status": "rejected",
+                    "status2": "Delayed"
+                }
+            }
+        )
+
+    return {"message": "Extension handled"}
+
+
+@router.put("/works/{work_id}/complete", tags=["Taskbar"])
+async def mark_complete(work_id: str, user=Depends(get_current_user)):
+
+    work = await work_collection.find_one({"work_id": work_id})
+
+    if not work:
+        raise HTTPException(404, "Work not found")
+
+    if work["staff_id"] != user["staff_id"]:
+        raise HTTPException(403, "Not your work")
+
+    await work_collection.update_one(
+        {"work_id": work_id},
+        {"$set": {"status2": "Completed"}}
+    )
+
+    return {"message": "Work marked as completed"}
 
 @router.post("/works/{work_id}/upload", tags=["Taskbar"])
 async def upload_work_document(
@@ -1196,6 +1393,9 @@ async def upload_work_document(
 
     if not await can_staff_access_work(user, work):
         raise HTTPException(403, "Not authorized to upload for this work")
+    
+    if work.get("extension_requested") and work.get("extension_status") == "pending":
+        raise HTTPException(400, "Extension already requested and pending")
 
     # ---------------- FILE VALIDATION ---------------- #
 
@@ -1352,10 +1552,24 @@ async def staff_view_works(user=Depends(get_current_user)):
 
     for work in works:
         work["_id"] = str(work["_id"])
-        work["status"] = calculate_status(
-            work["allocated_time"],
-            work["deadline_time"]
-        )
+
+        now = datetime.utcnow()
+
+        # PRIORITY LOGIC
+        if work.get("extension_requested") and work.get("extension_status") == "pending":
+            work["status2"] = "Extension Requested"
+
+        elif work.get("reason_for_delay"):
+            work["status2"] = "Delayed"
+
+        elif now > work["deadline_time"]:
+            work["status2"] = "Delayed"
+
+        elif work.get("progress_description"):
+            work["status2"] = "In Progress"
+
+        else:
+            work["status2"] = "Pending"
 
     return works
 

@@ -99,3 +99,6 @@ class LoginProjectAssociate(BaseModel):
 class PasswordChangeRequest(BaseModel):
     staff_id: str
     new_password: str = Field(..., min_length=4)
+
+class WorkProgressValueUpdate(BaseModel):
+    progress: int = Field(..., ge=0, le=100)
