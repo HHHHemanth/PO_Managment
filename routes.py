@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from database import users_collection, records_collection, records_deleted_collection, users_deleted_collection, document_links_collection, work_collection, work_document_collection, project_associate_deleted_collection,  password_change_logs_collection  
-from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate, WorkCreate, WorkProgressUpdate, WorkDelayUpdate, WorkSuggestionUpdate, WorkUpdate, ProjectAssociateUpdate, LoginProjectAssociate, PasswordChangeRequest, WorkProgressValueUpdate
+from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate, WorkCreate, WorkProgressUpdate, WorkDelayUpdate, WorkSuggestionUpdate, WorkUpdate, ProjectAssociateUpdate, LoginProjectAssociate, PasswordChangeRequest, WorkProgressValueUpdate, WorkTrackerUpdate
 from auth import verify_password, create_token
 from audit import log_action
 
@@ -961,13 +961,13 @@ async def get_works(user=Depends(get_current_user)):
 
         work["due_time_days"] = remaining_days
 
-    if work.get("extension_requested_at"):
+        if work.get("extension_requested_at"):
 
-        request_time = work["extension_requested_at"]
+            request_time = work["extension_requested_at"]
 
-        # Example: after 1 day → auto activate
-        if (datetime.utcnow() - request_time).total_seconds() > 86400:
-            work["status2"] = "Extension Requested"
+            # Example: after 1 day → auto activate
+            if (datetime.utcnow() - request_time).total_seconds() > 86400:
+                work["status2"] = "Extension Requested"
 
     return works
 
@@ -1014,7 +1014,7 @@ async def create_work(data: WorkCreate, user=Depends(get_current_user)):
         "description": data.description,
 
         "suggestion": "",
-
+        "tracker": None,  
         "progress": 0,
 
         "allocated_time": data.allocated_time,
@@ -1151,6 +1151,33 @@ async def update_progress_value(
     )
 
     return {"message": "Progress value updated"}
+
+
+@router.put("/works/{work_id}/tracker", tags=["Taskbar"])
+async def update_tracker(
+    work_id: str,
+    data: WorkTrackerUpdate,
+    user=Depends(get_current_user)
+):
+    work = await work_collection.find_one({"work_id": work_id})
+
+    if not work:
+        raise HTTPException(404, "Work not found")
+
+    # ✅ ACCESS CONTROL (same as other APIs)
+    if not await can_staff_access_work(user, work):
+        raise HTTPException(403, "Not authorized")
+
+    await work_collection.update_one(
+        {"work_id": work_id},
+        {
+            "$set": {
+                "tracker": data.tracker
+            }
+        }
+    )
+
+    return {"message": "Tracker updated successfully"}
 
 @router.put("/works/{work_id}/suggestion", tags=["Taskbar"])
 async def update_suggestion(

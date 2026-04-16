@@ -102,3 +102,6 @@ class PasswordChangeRequest(BaseModel):
 
 class WorkProgressValueUpdate(BaseModel):
     progress: int = Field(..., ge=0, le=100)
+
+class WorkTrackerUpdate(BaseModel):
+    tracker: str
