@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from database import users_collection, records_collection, records_deleted_collection, users_deleted_collection, document_links_collection, work_collection, work_document_collection, project_associate_deleted_collection,  password_change_logs_collection  
-from schemas import LoginAdmin, LoginStaff, RecordCreate, StaffCreate, WorkCreate, WorkProgressUpdate, WorkDelayUpdate, WorkSuggestionUpdate, WorkUpdate, ProjectAssociateUpdate, LoginProjectAssociate, PasswordChangeRequest, WorkProgressValueUpdate, WorkTrackerUpdate
+from schemas import LoginAdmin, LoginStaff, PRStatusUpdate, RecordCreate, StaffCreate, WorkCreate, WorkProgressUpdate, WorkDelayUpdate, WorkSuggestionUpdate, WorkUpdate, ProjectAssociateUpdate, LoginProjectAssociate, PasswordChangeRequest, WorkProgressValueUpdate, WorkTrackerUpdate
 from auth import verify_password, create_token
 from audit import log_action
 
@@ -229,6 +229,7 @@ async def create_record(record: RecordCreate, user=Depends(get_current_user)):
     remaining = approval - utilization
 
     new_record = record.dict()
+    new_record["pr_status"] = "open"
     new_record["total"] = approval
     new_record["remaining"] = remaining
 
@@ -292,6 +293,40 @@ async def update_record(record_id: str, record: RecordCreate, user=Depends(get_c
 
     return {"message": "Record updated"}
 
+
+@router.put("/records/{record_id}/status", tags=["Records"])
+async def update_pr_status(
+    record_id: str,
+    data: PRStatusUpdate,
+    user=Depends(get_current_user)
+):
+    record = await records_collection.find_one({"_id": ObjectId(record_id)})
+
+    if not record:
+        raise HTTPException(404, "Record not found")
+
+    # ✅ ADMIN → can update any
+    if user["role"] == "admin":
+        pass
+
+    # ✅ STAFF → only own record
+    elif user["role"] == "staff":
+        if record["staff_id"] != user["staff_id"]:
+            raise HTTPException(403, "You can update only your own records")
+
+    else:
+        raise HTTPException(403, "Not authorized")
+
+    await records_collection.update_one(
+        {"_id": ObjectId(record_id)},
+        {
+            "$set": {
+                "pr_status": data.pr_status
+            }
+        }
+    )
+
+    return {"message": "PR status updated successfully"}
 
 
 # ---------------- DELETE RECORD (ADMIN + STAFF OWN RECORDS) ---------------- #

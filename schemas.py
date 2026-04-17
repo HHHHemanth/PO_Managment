@@ -4,6 +4,7 @@ from pydantic import BaseModel, field_validator
 from typing import Optional, List
 from pydantic import EmailStr
 from datetime import datetime
+from enum import Enum
 
 class LoginAdmin(BaseModel):
     password: str
@@ -105,3 +106,10 @@ class WorkProgressValueUpdate(BaseModel):
 
 class WorkTrackerUpdate(BaseModel):
     tracker: str
+
+class PRStatus(str, Enum):
+    open = "open"
+    closed = "closed"
+
+class PRStatusUpdate(BaseModel):
+    pr_status: PRStatus
