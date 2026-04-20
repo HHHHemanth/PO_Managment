@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from database import users_collection, records_collection, records_deleted_collection, users_deleted_collection, document_links_collection, work_collection, work_document_collection, project_associate_deleted_collection,  password_change_logs_collection  
-from schemas import LoginAdmin, LoginStaff, PRStatusUpdate, RecordCreate, StaffCreate, WorkCreate, WorkProgressUpdate, WorkDelayUpdate, WorkSuggestionUpdate, WorkUpdate, ProjectAssociateUpdate, LoginProjectAssociate, PasswordChangeRequest, WorkProgressValueUpdate, WorkTrackerUpdate
+from schemas import FVCUpdate, LoginAdmin, LoginStaff, PRStatusUpdate, RecordCreate, StaffCreate, WorkCreate, WorkProgressUpdate, WorkDelayUpdate, WorkSuggestionUpdate, WorkUpdate, ProjectAssociateUpdate, LoginProjectAssociate, PasswordChangeRequest, WorkProgressValueUpdate, WorkTrackerUpdate
 from auth import verify_password, create_token
 from audit import log_action
 
@@ -232,7 +232,10 @@ async def create_record(record: RecordCreate, user=Depends(get_current_user)):
     new_record["pr_status"] = "open"
     new_record["total"] = approval
     new_record["remaining"] = remaining
-
+    new_record["fvc"] = {
+        "closure_date": None,
+        "document_id": None
+    }
     result = await records_collection.insert_one(new_record)
 
     # Audit log
@@ -373,6 +376,164 @@ async def delete_record(record_id: str, user=Depends(get_current_user)):
     )
 
     return {"message": "Record moved to deleted collection"}
+
+
+@router.put("/records/{record_id}/fvc/date", tags=["Records"])
+async def update_fvc_date(
+    record_id: str,
+    data: FVCUpdate,
+    user=Depends(get_current_user)
+):
+    record = await records_collection.find_one({"_id": ObjectId(record_id)})
+
+    if not record:
+        raise HTTPException(404, "Record not found")
+
+    # ✅ Permission
+    if user["role"] == "admin":
+        pass
+    elif user["role"] == "staff":
+        if record["staff_id"] != user["staff_id"]:
+            raise HTTPException(403, "Not authorized")
+    else:
+        raise HTTPException(403, "Unauthorized")
+
+    await records_collection.update_one(
+        {"_id": ObjectId(record_id)},
+        {
+            "$set": {
+                "fvc.closure_date": data.closure_date
+            }
+        }
+    )
+
+    return {"message": "Closure date updated"}
+
+@router.post("/records/{record_id}/fvc/upload", tags=["Records"])
+async def upload_fvc_document(
+    record_id: str,
+    file: UploadFile = File(...),
+    user=Depends(get_current_user)
+):
+    record = await records_collection.find_one({"_id": ObjectId(record_id)})
+
+    if not record:
+        raise HTTPException(404, "Record not found")
+
+    # permission
+    if user["role"] == "staff" and record["staff_id"] != user["staff_id"]:
+        raise HTTPException(403, "Not authorized")
+
+    file_extension = file.filename.split(".")[-1]
+    file_path = f"fvc/{record_id}.{file_extension}"
+
+    file_bytes = await file.read()
+
+    supabase.storage.from_("PO_Managment_Documents").upload(
+        file_path,
+        file_bytes
+    )
+
+    public_url = supabase.storage.from_("PO_Managment_Documents").get_public_url(file_path)
+
+    document_id = str(uuid.uuid4())
+
+    # save in document collection
+    await document_links_collection.insert_one({
+        "document_id": document_id,
+        "record_id": ObjectId(record_id),
+        "type": "fvc",
+        "file_path": file_path,
+        "public_url": public_url,
+        "status": "active",
+        "uploaded_by": user["staff_id"],
+        "uploaded_at": datetime.utcnow()
+    })
+
+    # update record
+    await records_collection.update_one(
+        {"_id": ObjectId(record_id)},
+        {
+            "$set": {
+                "fvc.document_id": document_id
+            }
+        }
+    )
+
+    return {
+        "message": "FVC document uploaded",
+        "document_id": document_id,
+        "url": public_url
+    }
+
+
+@router.get("/records/{record_id}/fvc/document", tags=["Records"])
+async def view_fvc_document(record_id: str, user=Depends(get_current_user)):
+
+    record = await records_collection.find_one({"_id": ObjectId(record_id)})
+
+    if not record:
+        raise HTTPException(404, "Record not found")
+
+    fvc = record.get("fvc", {})
+
+    closure_date = fvc.get("closure_date")
+    doc_id = fvc.get("document_id")
+
+    document_url = None
+
+    # ✅ If document exists → fetch it
+    if doc_id:
+        document = await document_links_collection.find_one({
+            "document_id": doc_id,
+            "status": "active"
+        })
+
+        if document:
+            document_url = document.get("public_url")
+
+    # ✅ ALWAYS RETURN (no error)
+    return {
+        "closure_date": closure_date,
+        "document_id": doc_id,
+        "document_url": document_url
+    }
+
+
+@router.delete("/records/{record_id}/fvc/document", tags=["Records"])
+async def delete_fvc_document(record_id: str, user=Depends(get_current_user)):
+
+    record = await records_collection.find_one({"_id": ObjectId(record_id)})
+
+    doc_id = record.get("fvc", {}).get("document_id")
+
+    if not doc_id:
+        raise HTTPException(404, "No FVC document")
+
+    await document_links_collection.update_one(
+        {"document_id": doc_id},
+        {
+            "$set": {
+                "status": "deleted",
+                "deleted_by": user["staff_id"],
+                "deleted_at": datetime.utcnow()
+            }
+        }
+    )
+
+    await records_collection.update_one(
+        {"_id": ObjectId(record_id)},
+        {
+            "$set": {
+                "fvc.document_id": None
+            }
+        }
+    )
+
+    return {"message": "FVC document deleted"}
+
+
+
 
 
 # ---------------- END RECORDS (ACTIVE) ---------------- #

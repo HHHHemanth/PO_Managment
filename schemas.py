@@ -113,3 +113,6 @@ class PRStatus(str, Enum):
 
 class PRStatusUpdate(BaseModel):
     pr_status: PRStatus
+
+class FVCUpdate(BaseModel):
+    closure_date: Optional[datetime] = None
